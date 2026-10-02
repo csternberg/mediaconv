@@ -1,0 +1,382 @@
+.TH MEDIACONV 1 "2026-10-02" "mediaconv 5.1" "User Commands"
+.SH NAME
+mediaconv \- batch-convert images, video and audio to widely compatible formats
+.SH SYNOPSIS
+.B mediaconv.py
+(\fB\-c\fR | \fB\-r\fR) [\fIFORMAT\fR...] [\fIOPTION\fR...]
+.br
+.B mediaconv.py
+\fB\-v\fR | \fB\-h\fR | \fB\-\-check\fR
+.SH DESCRIPTION
+.B mediaconv
+scans the current directory (or a whole tree) for files in the selected source
+formats and converts them to JPG, WebP, MP4, MP3 or M4A.
+Images are handled with Pillow, video and audio with ffmpeg.
+Work is spread over threads, with the worker count chosen from the system load.
+.PP
+Source files are matched by extension, case-insensitively.
+Output is written next to the source file.
+Each output is first written to a temporary
+.I .part
+file and moved into place only when the conversion succeeded,
+so a failure never leaves a truncated result.
+A source is never deleted
+.RB ( \-d )
+unless its conversion succeeded.
+.PP
+At least one scope switch and at least one format switch are required.
+.SH SCOPE
+One of these is required.
+.TP
+.BR \-c ", " \-C ", " \-\-current
+Process the current directory only.
+.TP
+.BR \-r ", " \-R ", " \-\-recursive
+Include subdirectories.
+.SH FORMAT SELECTORS
+.TP
+.B \-\-images
+All image formats:
+.BR \-\-png ,
+.BR \-\-webp ,
+.BR \-\-bmp ,
+.BR \-\-tiff ,
+.BR \-\-ico ,
+.BR \-\-heic .
+With
+.B \-\-image\-to webp
+the set is the same minus
+.B \-\-webp
+and plus
+.BR \-\-jpg .
+.TP
+.B \-\-videos
+All video formats except
+.BR \-\-ts ,
+because .ts is also the TypeScript extension.
+With
+.B \-\-extract\-audio
+it also includes
+.BR \-\-mp4 .
+.TP
+.B \-\-audio
+All audio formats
+.RB ( \-\-wma ,
+.BR \-\-flac ,
+.BR \-\-wav ,
+.BR \-\-ogg ,
+and
+.B \-\-m4a
+unless
+.B \-\-audio\-to aac
+is given).
+.SH IMAGE FORMATS
+.TP
+.B \-\-jpeg
+Rename
+.I .jpeg
+to
+.I .jpg
+(no conversion).
+.TP
+.B \-\-jpg
+Convert
+.I .jpg
+and
+.I .jpeg
+to WebP.
+Requires
+.BR "\-\-image\-to webp" .
+.TP
+.B \-\-png \-\-bmp \-\-ico
+Convert to the image target format.
+.B \-\-ico
+uses the largest size in the file.
+.TP
+.B \-\-webp
+Convert WebP to JPG.
+Cannot be combined with
+.BR "\-\-image\-to webp" .
+.TP
+.B \-\-tiff
+Convert
+.I .tif
+and
+.I .tiff
+(first page only).
+.TP
+.B \-\-heic
+Convert
+.I .heic
+and
+.IR .heif .
+Requires the pillow-heif package.
+.SH VIDEO FORMATS
+All video formats produce
+.I .mp4
+(H.264 video and AAC audio by default).
+.TP
+.B \-\-webm \-\-wmv \-\-avi \-\-flv \-\-mov \-\-mkv \-\-m4v \-\-3gp
+Convert the named container.
+.TP
+.B \-\-mpg
+.I .mpg
+and
+.IR .mpeg .
+.TP
+.B \-\-ts
+.IR .ts ,
+.I .mts
+and
+.IR .m2ts .
+Only selected explicitly, never by
+.BR \-\-videos .
+.TP
+.B \-\-gif
+Convert an animated GIF to a silent MP4.
+.TP
+.B \-\-mp4
+Source for
+.B \-\-extract\-audio
+only.
+.SH AUDIO FORMATS
+.TP
+.B \-\-wma \-\-flac \-\-wav \-\-ogg \-\-m4a
+Convert to MP3, or to AAC in
+.I .m4a
+with
+.BR "\-\-audio\-to aac" .
+.B \-\-m4a
+as a source cannot be combined with
+.BR "\-\-audio\-to aac" .
+.SH IMAGE OPTIONS
+.TP
+.BI \-\-image\-to " FORMAT"
+Target image format:
+.B jpg
+(default) or
+.BR webp .
+.TP
+.BI \-\-quality " N"
+Image quality, 1\-100.
+Default 95 for JPG and 90 for WebP.
+.TP
+.BI \-\-max\-size " PX"
+Shrink images so the longest side is at most
+.I PX
+pixels.
+Smaller images are left alone.
+.TP
+.B \-\-strip\-metadata
+Drop EXIF and GPS metadata.
+Metadata is kept by default, and EXIF orientation is always applied to the pixels.
+.PP
+Transparency is flattened onto white for JPG and kept for WebP.
+.SH VIDEO OPTIONS
+.TP
+.B \-\-h265
+Encode H.265/HEVC instead of H.264.
+.TP
+.BI \-\-crf " N"
+Quality, lower is better.
+Default 23 for H.264 and 28 for H.265.
+For hardware encoders it is mapped to the encoder's constant-quality setting.
+.TP
+.BI \-\-preset " NAME"
+Software encoder speed, from
+.B ultrafast
+to
+.BR veryslow .
+Default
+.BR medium .
+.TP
+.BI \-\-hw " ENCODER"
+Use a hardware encoder:
+.BR nvenc ,
+.BR qsv
+or
+.BR amf .
+Fails with a message if the installed ffmpeg lacks it.
+.TP
+.B \-\-remux
+For mkv, mov, ts, m4v, 3gp and mpg sources, copy the streams into MP4 without
+re-encoding.
+Audio that MP4 cannot carry is converted to AAC;
+if the video codec does not fit MP4, or the copy fails, the file is re-encoded.
+Requires
+.BR ffprobe .
+.SH AUDIO OPTIONS
+.TP
+.BI \-\-audio\-to " FORMAT"
+Audio target:
+.B mp3
+(default) or
+.B aac
+(written as
+.IR .m4a ).
+.TP
+.BI \-\-abitrate " RATE"
+Audio bitrate, for example
+.BR 192k .
+Default
+.BR 192k .
+.TP
+.B \-\-extract\-audio
+Video sources produce audio files instead of MP4.
+A video without an audio track is reported as an error and its source is kept.
+.SH BEHAVIOR
+.TP
+.BR \-o ", " \-O ", " \-\-overwrite
+Overwrite existing output.
+.TP
+.BR \-s ", " \-S ", " \-\-skip\-existing
+Skip a file when its output already exists.
+.TP
+.BR \-d ", " \-D ", " \-\-delete\-source
+Delete the source after a successful conversion.
+.TP
+.BR \-n ", " \-N ", " \-\-dry\-run
+Show what would happen without converting anything.
+.TP
+.BR \-l ", " \-L ", " \-\-log
+Write the activity log
+.IR mediaconv.log .
+Errors are logged regardless, see
+.BR FILES .
+.PP
+.B \-\-overwrite
+and
+.B \-\-skip\-existing
+cannot be combined.
+With neither, a name conflict is resolved by appending
+.IR _001 ,
+.IR _002 ,
+and so on to the output name, and the existing file is left untouched.
+.SH PREREQUISITES
+.TP
+.BR \-y ", " \-Y ", " \-\-yes
+Allow installing missing prerequisites without asking.
+.TP
+.B \-\-no\-install
+Never offer to install anything.
+.TP
+.B \-\-check
+Print the status of Pillow, pillow-heif, ffmpeg, ffprobe and the hardware
+encoders, then exit.
+.PP
+Only what the selected files need is checked, after the files have been found.
+If something is missing,
+.B mediaconv
+shows the exact install command and asks for confirmation.
+Without a terminal and without
+.B \-\-yes
+nothing is installed.
+Dry runs skip the check.
+.PP
+Installers used:
+.B pip
+for Pillow and pillow-heif;
+.B winget
+(Windows),
+.B brew
+(macOS), or
+.BR apt\-get ,
+.BR dnf ,
+.B pacman
+or
+.B zypper
+through
+.B sudo
+(Linux) for ffmpeg.
+.SH HELP
+.TP
+.BR \-h ", " \-H ", " \-\-help
+Show the full switch list, headed by the version.
+.TP
+.BR \-v ", " \-V ", " \-\-version
+Show the version and exit.
+.PP
+Every single-letter switch is accepted in either case.
+A malformed command line prints the version, a short usage line and the error.
+.SH OUTPUT
+The console shows per-type file counts, a
+.B Processing:
+line per file, and a final summary.
+On a terminal, a live status line shows
+.B x of y files processed
+plus the percent done of each active ffmpeg job (percentages need
+.BR ffprobe ).
+When output is redirected, one
+.B [x/y] name
+line is printed per finished file instead.
+.SH FILES
+.TP
+.I mediaconv.errors.log
+Written in the working directory whenever an error occurs, with or without
+.BR \-\-log .
+Created on the first error, so it exists only if something failed.
+.TP
+.I mediaconv.log
+Written in the working directory only with
+.BR \-\-log .
+.SH EXIT STATUS
+.TP
+.B 0
+Success, or no matching files.
+.TP
+.B 1
+One or more conversions failed, or a prerequisite is missing.
+.TP
+.B 2
+Invalid command line.
+.SH EXAMPLES
+Convert PNG and WebP files in the current directory to JPG:
+.PP
+.RS
+.nf
+mediaconv.py \-c \-\-png \-\-webp
+.fi
+.RE
+.PP
+Convert every image under the current tree to WebP:
+.PP
+.RS
+.nf
+mediaconv.py \-r \-\-images \-\-image\-to webp
+.fi
+.RE
+.PP
+Turn all videos into MP4, copying streams where possible, and delete the originals:
+.PP
+.RS
+.nf
+mediaconv.py \-r \-\-videos \-\-remux \-d
+.fi
+.RE
+.PP
+Re-encode MKV files as H.265:
+.PP
+.RS
+.nf
+mediaconv.py \-r \-\-mkv \-\-h265 \-\-crf 26
+.fi
+.RE
+.PP
+Extract MP3 audio from MP4 files:
+.PP
+.RS
+.nf
+mediaconv.py \-c \-\-mp4 \-\-extract\-audio
+.fi
+.RE
+.PP
+Preview resizing HEIC photos to JPG without changing anything:
+.PP
+.RS
+.nf
+mediaconv.py \-r \-\-heic \-\-max\-size 2048 \-n
+.fi
+.RE
+.SH SEE ALSO
+.BR ffmpeg (1),
+.BR ffprobe (1)

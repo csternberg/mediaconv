@@ -20,7 +20,7 @@
 - `--overwrite` and `--skip-existing` are mutually exclusive. Default is conflict-safe `_NNN` suffixes.
 - Prerequisites are never installed without confirmation (`confirm()`); only `--yes` bypasses the prompt, and `--no-install` forbids it.
 - Switch convention: long options `--kebab-case`; every single-letter switch must be registered in both cases (`-c`, `-C`).
-- Bump `VERSION`/`VERSION_DATE` (and the docstring) on behavior changes. `ShortUsageParser.error` prints version + short usage on bad command lines. Keep README's tables and the `--help` text in sync.
+- Bump `VERSION`/`VERSION_DATE` (and the docstring) on behavior changes. `ShortUsageParser.error` prints version + short usage on bad command lines. Keep README's tables, `mediaconv.1` (man page) and the `--help` text in sync.
 - Keep help and console output ASCII-only (Windows cp1252 consoles crash on `→`).
 
 ## Style

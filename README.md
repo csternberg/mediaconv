@@ -97,6 +97,10 @@ python mediaconv.py -r --heic --max-size 2048 -n     # preview HEIC -> resized J
 
 Exit codes: `0` success, `1` conversion failures or missing prerequisites, `2` invalid arguments.
 
+## Man page
+
+`mediaconv.1` is the manual page. View it with `man ./mediaconv.1`, or install it with `install -Dm644 mediaconv.1 /usr/local/share/man/man1/mediaconv.1`. Keep it in sync with the switches in `--help` when they change.
+
 ## Upgrading from v4
 
 All switches now follow one convention: long options use `--`, with short aliases for the common ones.
