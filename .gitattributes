@@ -1,0 +1,2 @@
+# roff and shell-style files must keep LF line endings
+*.1 text eol=lf
