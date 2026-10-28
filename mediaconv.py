@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 mediaconv.py
-Version: 2026-10-28 v5.2
+Version: 2026-10-28 v5.2.1
 
 Adaptive media converter (images, video, audio).
 
@@ -31,7 +31,7 @@ from fractions import Fraction
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
-VERSION = "5.2"
+VERSION = "5.2.1"
 VERSION_DATE = "2026-10-28"
 VERSION_TEXT = f"mediaconv.py v{VERSION} ({VERSION_DATE})"
 
@@ -560,12 +560,19 @@ def image_convert(src, args, mode):
         return "error"
 
 
+def cli_path(path):
+    """Path as a command-line argument; a name starting with '-' gets a ./ prefix
+    so ffmpeg/ffprobe do not read it as an option."""
+    text = str(path)
+    return os.path.join(".", text) if text.startswith("-") else text
+
+
 def probe_duration(src):
     """Duration in seconds via ffprobe, or None if unavailable."""
     try:
         out = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "csv=p=0", str(src)],
+             "-of", "csv=p=0", cli_path(src)],
             capture_output=True, text=True, timeout=30).stdout.strip()
         return float(out) if out else None
     except (OSError, ValueError, subprocess.SubprocessError):
@@ -578,7 +585,7 @@ def probe_codecs(src):
     try:
         out = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type,codec_name",
-             "-of", "csv=p=0", str(src)],
+             "-of", "csv=p=0", cli_path(src)],
             capture_output=True, text=True, timeout=30).stdout
     except (OSError, subprocess.SubprocessError):
         return None, None
@@ -607,8 +614,8 @@ def run_ffmpeg(srcs, tmp, out_args, fmt, duration, label=None, segments=None):
     label = label or srcs[0].name
     cmd = ["ffmpeg", "-y", "-nostdin", "-loglevel", "error",
            "-progress", "pipe:1", "-nostats",
-           *[a for src in srcs for a in ("-i", str(src))],
-           *out_args, "-f", fmt, str(tmp)]
+           *[a for src in srcs for a in ("-i", cli_path(src))],
+           *out_args, "-f", fmt, cli_path(tmp)]
 
     def adding(seconds):
         """Note naming the merge input that output time `seconds` falls in."""
@@ -790,7 +797,7 @@ def probe_media(src):
             ["ffprobe", "-v", "error", "-show_entries",
              "stream=codec_type,width,height,avg_frame_rate,r_frame_rate"
              ":stream_tags=rotate:stream_side_data=rotation:format=duration",
-             "-of", "json", str(src)],
+             "-of", "json", cli_path(src)],
             capture_output=True, text=True, timeout=60).stdout
         info = json.loads(out)
         streams = info.get("streams", [])
