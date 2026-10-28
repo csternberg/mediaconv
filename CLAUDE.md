@@ -9,6 +9,7 @@
 
 ## Architecture
 - `MODES` maps each format flag to (source suffixes, kind, help text); argparse flags are generated from it. `target_suffix()` and `convert()` decide output extension and handler. To add a format, add a `MODES` entry (and to `IMAGE_GROUP`/`VIDEO_GROUP`/`AUDIO_GROUP` if it belongs in a selector).
+- `.gif` is only handled by `--gifv` (video, MP4) and `--gifi` (image, first frame); neither is in a group. `collect()` yields one task per mode, so a gif can feed both; `finish_source()` defers `-d` for that case.
 - `expand_modes()` expands selectors and validates switch combinations. `ensure_prerequisites()` runs after file collection and only checks what the found files need.
 - Flow: `main` -> `build_tasks` -> `collect` (case-insensitive) -> `ensure_prerequisites` -> `run_pipeline` (images, then ffmpeg jobs, via `ThreadPoolExecutor`) -> `worker` -> converter.
 - `--merge` bypasses `run_pipeline`: `build_merge_jobs` groups tasks by folder, `run_merge` -> `merge_worker` -> `merge_folder` (probes with `probe_media`, builds the scale/pad/concat graph in `merge_args`). With `-d`, `main` warns and asks via `confirm_delete()` (`--yes` bypasses).

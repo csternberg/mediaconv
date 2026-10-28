@@ -1,4 +1,4 @@
-.TH MEDIACONV 1 "2026-10-28" "mediaconv 5.2.1" "User Commands"
+.TH MEDIACONV 1 "2026-10-28" "mediaconv 5.3" "User Commands"
 .SH NAME
 mediaconv \- batch-convert images, video and audio to widely compatible formats
 .SH SYNOPSIS
@@ -74,6 +74,18 @@ unless
 is given).
 .SH IMAGE FORMATS
 .TP
+.B \-\-gifi
+Extract the first frame of a GIF as an image
+.RI ( .jpg ,
+or
+.I .webp
+with
+.BR \-\-image\-to ).
+Never selected by
+.BR \-\-images .
+Can be combined with
+.BR \-\-gifv .
+.TP
 .B \-\-jpeg
 Rename
 .I .jpeg
@@ -134,8 +146,16 @@ and
 Also selected by
 .BR \-\-videos .
 .TP
-.B \-\-gif
+.B \-\-gifv
 Convert an animated GIF to a silent MP4.
+Never selected by
+.BR \-\-videos .
+If
+.B \-\-gifi
+is also given, static GIFs are left to it.
+After
+.B \-d
+such a GIF is deleted only when both outputs were written.
 .TP
 .B \-\-mp4
 Source for

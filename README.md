@@ -8,13 +8,14 @@ A single-file Python tool that batch-converts images, video and audio in the cur
 |-------|----------|--------|
 | Image | `--jpeg` (rename only), `--png`, `--webp`, `--bmp`, `--tiff`, `--ico`, `--heic` | `.jpg` |
 | Image | `--jpg` (needs `--image-to webp`) plus any of the above except `--webp` | `.webp` |
-| Video | `--webm`, `--wmv`, `--avi`, `--flv`, `--mov`, `--mkv`, `--mpg`, `--3gp`, `--m4v`, `--ts`, `--gif` | `.mp4` |
+| Image | `--gifi` (first frame of a `.gif`) | `.jpg` (or `.webp`) |
+| Video | `--webm`, `--wmv`, `--avi`, `--flv`, `--mov`, `--mkv`, `--mpg`, `--3gp`, `--m4v`, `--ts`, `--gifv` | `.mp4` |
 | Audio | `--wma`, `--flac`, `--wav`, `--ogg`, `--m4a` | `.mp3` (or `.m4a` with `--audio-to aac`) |
 | Video → audio | `--mp4` and any video switch, with `--extract-audio` | `.mp3` / `.m4a` |
 
-`--images`, `--videos` and `--audio` select every format of that kind. `--videos` includes `--ts`; since `.ts` is also TypeScript, prefer a narrower selector when a tree contains TypeScript sources (a non-video `.ts` fails to convert and its source is kept).
+`--images`, `--videos` and `--audio` select every format of that kind, except GIF: `.gif` files are only processed with `--gifv` (animated GIF to MP4, no audio) or `--gifi` (first frame as an image). With both, an animated GIF produces both outputs and a static GIF only the image. With `-d` such a GIF is deleted only after both outputs were written. `--videos` includes `--ts`; since `.ts` is also TypeScript, prefer a narrower selector when a tree contains TypeScript sources (a non-video `.ts` fails to convert and its source is kept).
 
-Multi-frame inputs: `--tiff` converts the first page; `--gif` is treated as a video and becomes an MP4 (no audio).
+Multi-frame inputs: `--tiff` converts the first page; `--gifi` takes the first frame of a GIF.
 
 ## Requirements
 

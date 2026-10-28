@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 mediaconv.py
-Version: 2026-10-28 v5.2.1
+Version: 2026-10-28 v5.3
 
 Adaptive media converter (images, video, audio).
 
@@ -31,7 +31,7 @@ from fractions import Fraction
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
-VERSION = "5.2.1"
+VERSION = "5.3"
 VERSION_DATE = "2026-10-28"
 VERSION_TEXT = f"mediaconv.py v{VERSION} ({VERSION_DATE})"
 
@@ -53,6 +53,7 @@ MODES = {
     "tiff": ((".tif", ".tiff"), "image", "convert .tif/.tiff (first page)"),
     "ico":  ((".ico",), "image", "convert .ico (largest size)"),
     "heic": ((".heic", ".heif"), "image", "convert .heic/.heif (needs pillow-heif)"),
+    "gifi": ((".gif",), "image", "extract the first frame of .gif (not in --images)"),
     # video -> .mp4
     "webm": ((".webm",), "video", "convert .webm to MP4"),
     "wmv":  ((".wmv",), "video", "convert .wmv to MP4"),
@@ -64,7 +65,7 @@ MODES = {
     "3gp":  ((".3gp",), "video", "convert .3gp to MP4"),
     "m4v":  ((".m4v",), "video", "convert .m4v to MP4"),
     "ts":   ((".ts", ".mts", ".m2ts"), "video", "convert .ts/.mts/.m2ts to MP4"),
-    "gif":  ((".gif",), "video", "convert animated .gif to MP4"),
+    "gifv": ((".gif",), "video", "convert animated .gif to MP4 (not in --videos)"),
     "mp4":  ((".mp4",), "video", "source for --extract-audio or --merge only"),
     # audio -> .mp3 (or .m4a with --audio-to aac)
     "wma":  ((".wma",), "audio", "convert .wma"),
@@ -83,7 +84,7 @@ MP4_AUDIO = {"aac", "mp3", "ac3", "eac3", "alac"}
 
 # --images / --videos / --audio selectors (extras depend on options, see expand_modes)
 IMAGE_GROUP = ["png", "webp", "bmp", "tiff", "ico", "heic"]
-VIDEO_GROUP = ["webm", "wmv", "avi", "flv", "mov", "mkv", "mpg", "ts", "3gp", "m4v", "gif"]
+VIDEO_GROUP = ["webm", "wmv", "avi", "flv", "mov", "mkv", "mpg", "ts", "3gp", "m4v"]
 AUDIO_GROUP = ["wma", "flac", "wav", "ogg", "m4a"]
 
 HW_ENCODERS = {                     # (h264, h265)
@@ -458,12 +459,16 @@ def resolve_target(src: Path, suffix: str, args):
 
 def collect(modes, recursive):
     """Single directory walk; suffix match is case-insensitive."""
-    by_suffix = {s: m for m in modes for s in MODES[m][0]}
+    by_suffix = {}
+    for m in modes:
+        for s in MODES[m][0]:
+            by_suffix.setdefault(s, []).append(m)
     base = Path(".")
     entries = base.rglob("*") if recursive else base.glob("*")
-    return [(f, by_suffix[f.suffix.lower()])
+    return [(f, m)
             for f in entries
-            if f.suffix.lower() in by_suffix and f.is_file()]
+            if f.suffix.lower() in by_suffix and f.is_file()
+            for m in by_suffix[f.suffix.lower()]]
 
 
 def print_file_summary(tasks):
@@ -487,6 +492,41 @@ def print_file_summary(tasks):
 def delete_source(src):
     src.unlink()
     record(f"DELETE {src}")
+
+
+def is_animated(src):
+    """True for a multi-frame image; unreadable files count as animated."""
+    try:
+        from PIL import Image as PILImage
+        with PILImage.open(src) as im:
+            return bool(getattr(im, "is_animated", False))
+    except Exception:
+        return True
+
+
+gifi_done = set()       # animated gifs whose first-frame image is written (under lock)
+
+
+def finish_source(src, mode, args):
+    """Delete the source after a successful conversion (-d).
+
+    With --gifv and --gifi both selected, a gif feeds two jobs: it is kept
+    until the first-frame image exists, then removed by the video job (which
+    also runs, and just skips, for a static gif).
+    """
+    if not args.delete_source:
+        return
+    if mode == "gifi" and args.gifv:
+        with lock:
+            gifi_done.add(src)
+        return
+    if mode == "gifv" and args.gifi:
+        with lock:
+            image_ok = src in gifi_done
+        if not image_ok:
+            record(f"KEEP {src} (its first-frame image was not written)")
+            return
+    delete_source(src)
 
 
 def begin(src, mode, args):
@@ -550,8 +590,7 @@ def image_convert(src, args, mode):
         os.replace(tmp, dst)
         record(f"CONVERT {mode} {src} -> {dst}")
 
-        if args.delete_source:
-            delete_source(src)
+        finish_source(src, mode, args)
         return "ok"
 
     except Exception as e:
@@ -675,7 +714,7 @@ def video_encoder_args(args):
 
 
 def encode_args(mode, args):
-    if mode == "gif":
+    if mode == "gifv":
         return ["-an", "-vf", EVEN_DIMS, "-c:v", "libx264", "-crf", "23",
                 "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
 
@@ -713,8 +752,7 @@ def video_convert(src, args, mode):
         os.replace(tmp, dst)
         record(f"CONVERT ({how}) {mode} {src} -> {dst}")
 
-        if args.delete_source:
-            delete_source(src)
+        finish_source(src, mode, args)
         return "ok"
 
     except Exception as e:
@@ -917,6 +955,11 @@ def merge_folder(folder, files, args):
 
 def convert(mode, src, args):
     kind = MODES[mode][1]
+    if mode == "gifv" and args.gifi and not is_animated(src):
+        record(f"SKIP {src} (static gif, --gifi writes the image)")
+        if not args.dry_run:
+            finish_source(src, mode, args)
+        return "skipped"
     if mode == "jpeg":
         return jpeg_rename(src, args, mode)
     if kind == "image":
