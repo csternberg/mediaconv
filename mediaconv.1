@@ -1,4 +1,4 @@
-.TH MEDIACONV 1 "2026-10-02" "mediaconv 5.1" "User Commands"
+.TH MEDIACONV 1 "2026-10-28" "mediaconv 5.2" "User Commands"
 .SH NAME
 mediaconv \- batch-convert images, video and audio to widely compatible formats
 .SH SYNOPSIS
@@ -51,11 +51,13 @@ and plus
 .BR \-\-jpg .
 .TP
 .B \-\-videos
-All video formats except
-.BR \-\-ts ,
-because .ts is also the TypeScript extension.
+All video formats, including
+.BR \-\-ts
+(note that .ts is also the TypeScript extension).
 With
 .B \-\-extract\-audio
+or
+.B \-\-merge
 it also includes
 .BR \-\-mp4 .
 .TP
@@ -129,7 +131,7 @@ and
 .I .mts
 and
 .IR .m2ts .
-Only selected explicitly, never by
+Also selected by
 .BR \-\-videos .
 .TP
 .B \-\-gif
@@ -138,6 +140,8 @@ Convert an animated GIF to a silent MP4.
 .B \-\-mp4
 Source for
 .B \-\-extract\-audio
+or
+.B \-\-merge
 only.
 .SH AUDIO FORMATS
 .TP
@@ -205,6 +209,37 @@ Audio that MP4 cannot carry is converted to AAC;
 if the video codec does not fit MP4, or the copy fails, the file is re-encoded.
 Requires
 .BR ffprobe .
+.SH MERGE
+.TP
+.BR \-m ", " \-M ", " \-\-merge
+Join the videos of each folder into one MP4 named
+.IB folder _merged.mp4
+in that folder, in natural name order (clip2 before clip10).
+With
+.BR \-r ,
+every subfolder is merged separately.
+Folders with a single video, and earlier
+.I *_merged.mp4
+outputs, are skipped.
+All clips are scaled to fit the largest frame (by area) keeping their aspect
+ratio, and padded with black in one or both dimensions where needed.
+The frame rate is matched to the highest, audio is converted to a common
+format, and clips without audio get silence.
+Files that ffprobe cannot read as video are left out and kept.
+Merging always re-encodes, so it cannot be combined with
+.B \-\-remux
+or
+.BR \-\-extract\-audio ,
+and needs
+.BR ffprobe .
+.PP
+With
+.BR \-d ,
+a warning states how many source files may be deleted and asks for confirmation
+unless
+.B \-\-yes
+is given; declining cancels the run.
+Sources are deleted only after their folder was merged successfully.
 .SH AUDIO OPTIONS
 .TP
 .BI \-\-audio\-to " FORMAT"
@@ -234,6 +269,9 @@ Skip a file when its output already exists.
 .TP
 .BR \-d ", " \-D ", " \-\-delete\-source
 Delete the source after a successful conversion.
+With
+.B \-\-merge
+a warning and confirmation come first.
 .TP
 .BR \-n ", " \-N ", " \-\-dry\-run
 Show what would happen without converting anything.

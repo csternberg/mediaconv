@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 mediaconv.py
-Version: 2026-10-02 v5.1
+Version: 2026-10-28 v5.2
 
 Adaptive media converter (images, video, audio).
 
@@ -11,12 +11,14 @@ Adaptive media converter (images, video, audio).
 - ffmpeg pipeline (output written to a .part file, then moved into place)
 - global conflict-safe naming
 - offers to install missing prerequisites (Pillow, pillow-heif, ffmpeg)
+- --merge joins the videos of each folder into one MP4 (resized/padded to the largest)
 
 Run with --help for the full switch list.
 """
 
 import os
 import re
+import json
 import sys
 import glob
 import shutil
@@ -25,11 +27,12 @@ import importlib
 import subprocess
 import threading
 from pathlib import Path
+from fractions import Fraction
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
-VERSION = "5.1"
-VERSION_DATE = "2026-10-02"
+VERSION = "5.2"
+VERSION_DATE = "2026-10-28"
 VERSION_TEXT = f"mediaconv.py v{VERSION} ({VERSION_DATE})"
 
 Image = ImageOps = None     # Pillow, loaded on demand by ensure_prerequisites()
@@ -60,10 +63,9 @@ MODES = {
     "mpg":  ((".mpg", ".mpeg"), "video", "convert .mpg/.mpeg to MP4"),
     "3gp":  ((".3gp",), "video", "convert .3gp to MP4"),
     "m4v":  ((".m4v",), "video", "convert .m4v to MP4"),
-    "ts":   ((".ts", ".mts", ".m2ts"), "video",
-             "convert .ts/.mts/.m2ts to MP4 (explicit only: .ts is also TypeScript)"),
+    "ts":   ((".ts", ".mts", ".m2ts"), "video", "convert .ts/.mts/.m2ts to MP4"),
     "gif":  ((".gif",), "video", "convert animated .gif to MP4"),
-    "mp4":  ((".mp4",), "video", "source for --extract-audio only"),
+    "mp4":  ((".mp4",), "video", "source for --extract-audio or --merge only"),
     # audio -> .mp3 (or .m4a with --audio-to aac)
     "wma":  ((".wma",), "audio", "convert .wma"),
     "flac": ((".flac",), "audio", "convert .flac"),
@@ -81,7 +83,7 @@ MP4_AUDIO = {"aac", "mp3", "ac3", "eac3", "alac"}
 
 # --images / --videos / --audio selectors (extras depend on options, see expand_modes)
 IMAGE_GROUP = ["png", "webp", "bmp", "tiff", "ico", "heic"]
-VIDEO_GROUP = ["webm", "wmv", "avi", "flv", "mov", "mkv", "mpg", "3gp", "m4v", "gif"]
+VIDEO_GROUP = ["webm", "wmv", "avi", "flv", "mov", "mkv", "mpg", "ts", "3gp", "m4v", "gif"]
 AUDIO_GROUP = ["wma", "flac", "wav", "ogg", "m4a"]
 
 HW_ENCODERS = {                     # (h264, h265)
@@ -133,16 +135,22 @@ class Progress:
     def __init__(self):
         self.total = 0
         self.done = 0
-        self.active = {}          # name -> percent (None = unknown)
+        self.unit = "files"
+        self.active = {}          # name -> (percent or None, note or None)
         self.live = sys.stdout.isatty()
         self._lock = threading.RLock()
         self._width = 0
 
     def _line(self):
-        parts = [f"{self.done} of {self.total} files processed"]
-        for name, pct in self.active.items():
-            if pct is not None:
-                parts.append(f"{name[:30]} {pct:3d}%")
+        parts = [f"{self.done} of {self.total} {self.unit} processed"]
+        for name, (pct, note) in self.active.items():
+            if pct is not None or note:
+                text = name[:30]
+                if pct is not None:
+                    text += f" {pct:3d}%"
+                if note:
+                    text += f" ({note})"
+                parts.append(text)
         return " | ".join(parts)
 
     def _clear(self):
@@ -168,10 +176,10 @@ class Progress:
             print(msg, file=file or sys.stdout)
             self._draw()
 
-    def update(self, name, pct):
+    def update(self, name, pct, note=None):
         with self._lock:
-            if self.active.get(name) != pct:
-                self.active[name] = pct
+            if self.active.get(name) != (pct, note):
+                self.active[name] = (pct, note)
                 self._redraw()
 
     def finish_file(self, name):
@@ -202,6 +210,19 @@ def confirm(question, args):
         return True
     if not sys.stdin.isatty():
         print("(non-interactive session: re-run with --yes to allow installs)")
+        return False
+    try:
+        return input(f"{question} [y/N] ").strip().lower() in ("y", "yes")
+    except EOFError:
+        return False
+
+
+def confirm_delete(question, args):
+    """Ask before a destructive step; only --yes skips the prompt."""
+    if args.yes:
+        return True
+    if not sys.stdin.isatty():
+        print("(non-interactive session: re-run with --yes to allow deletion)")
         return False
     try:
         return input(f"{question} [y/N] ").strip().lower() in ("y", "yes")
@@ -332,6 +353,9 @@ def ensure_prerequisites(modes, args):
     if kinds & {"video", "audio"}:
         if not ensure_ffmpeg(args):
             return False
+        if args.merge and not shutil.which("ffprobe"):
+            print("ERROR: --merge needs ffprobe (it ships with ffmpeg) but it was not found.")
+            return False
         if args.hw and not has_encoder(HW_ENCODERS[args.hw][1 if args.h265 else 0]):
             print(f"ERROR: ffmpeg has no {args.hw} encoder for this codec on this build.")
             return False
@@ -414,15 +438,18 @@ def unique(path: Path):
             i += 1
 
 
-def resolve_target(src: Path, suffix: str, args):
-    """Return the destination path, or None if the file should be skipped."""
-    dst = src.with_suffix(suffix)
-
+def reserve(dst: Path, args):
+    """Return the destination path under the conflict policy, or None to skip."""
     if args.overwrite:
         return dst
     if args.skip_existing and dst.exists():
         return None
     return unique(dst)
+
+
+def resolve_target(src: Path, suffix: str, args):
+    """Return the destination path, or None if the file should be skipped."""
+    return reserve(src.with_suffix(suffix), args)
 
 
 # =========================================================
@@ -571,13 +598,30 @@ def remux_args(src):
             "-movflags", "+faststart"]
 
 
-def run_ffmpeg(src, tmp, out_args, fmt, duration):
-    """Run ffmpeg into tmp, reporting percent. Raises RuntimeError on failure."""
+def run_ffmpeg(srcs, tmp, out_args, fmt, duration, label=None, segments=None):
+    """Run ffmpeg over the input files into tmp, reporting percent.
+
+    segments are the input durations of a merge; they let the status line say
+    which input is being added. Raises RuntimeError on failure.
+    """
+    label = label or srcs[0].name
     cmd = ["ffmpeg", "-y", "-nostdin", "-loglevel", "error",
            "-progress", "pipe:1", "-nostats",
-           "-i", str(src), *out_args, "-f", fmt, str(tmp)]
+           *[a for src in srcs for a in ("-i", str(src))],
+           *out_args, "-f", fmt, str(tmp)]
 
-    progress.update(src.name, 0 if duration else None)
+    def adding(seconds):
+        """Note naming the merge input that output time `seconds` falls in."""
+        if not segments:
+            return None
+        end = 0
+        for k, length in enumerate(segments, 1):
+            end += length
+            if seconds < end:
+                return f"adding file {k}/{len(segments)}"
+        return f"adding file {len(segments)}/{len(segments)}"
+
+    progress.update(label, 0 if duration else None, adding(0))
 
     # stderr is merged into stdout so one reader drains both (no deadlock)
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
@@ -590,7 +634,7 @@ def run_ffmpeg(src, tmp, out_args, fmt, duration):
         if m:
             if duration:
                 pct = min(99, int(int(m.group(1)) / 1e6 / duration * 100))
-                progress.update(src.name, pct)
+                progress.update(label, pct, adding(int(m.group(1)) / 1e6))
         elif line and "=" not in line:
             errors.append(line)
     proc.wait()
@@ -602,11 +646,8 @@ def run_ffmpeg(src, tmp, out_args, fmt, duration):
 EVEN_DIMS = "scale=trunc(iw/2)*2:trunc(ih/2)*2"     # yuv420p needs even sizes
 
 
-def encode_args(mode, args):
-    if mode == "gif":
-        return ["-an", "-vf", EVEN_DIMS, "-c:v", "libx264", "-crf", "23",
-                "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
-
+def video_encoder_args(args):
+    """Video codec, quality and pixel format options shared by convert and merge."""
     if args.hw:
         enc = HW_ENCODERS[args.hw][1 if args.h265 else 0]
     else:
@@ -622,8 +663,16 @@ def encode_args(mode, args):
     else:   # amf
         quality = ["-rc", "cqp", "-qp_i", q, "-qp_p", q]
 
-    return ["-sn", "-vf", EVEN_DIMS, "-c:v", enc, *quality, "-pix_fmt", "yuv420p",
-            *(["-tag:v", "hvc1"] if args.h265 else []),
+    return ["-c:v", enc, *quality, "-pix_fmt", "yuv420p",
+            *(["-tag:v", "hvc1"] if args.h265 else [])]
+
+
+def encode_args(mode, args):
+    if mode == "gif":
+        return ["-an", "-vf", EVEN_DIMS, "-c:v", "libx264", "-crf", "23",
+                "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
+
+    return ["-sn", "-vf", EVEN_DIMS, *video_encoder_args(args),
             "-c:a", "aac", "-movflags", "+faststart"]
 
 
@@ -644,7 +693,7 @@ def video_convert(src, args, mode):
         duration = probe_duration(src)
         for i, (how, out_args) in enumerate(attempts):
             try:
-                run_ffmpeg(src, tmp, out_args, "mp4", duration)
+                run_ffmpeg([src], tmp, out_args, "mp4", duration)
                 break
             except RuntimeError as e:
                 tmp.unlink(missing_ok=True)
@@ -681,7 +730,7 @@ def audio_convert(src, args, mode):
     out_args = ["-vn", "-map_metadata", "0", *codec, "-b:a", args.abitrate]
 
     try:
-        run_ffmpeg(src, tmp, out_args, fmt, probe_duration(src))
+        run_ffmpeg([src], tmp, out_args, fmt, probe_duration(src))
         os.replace(tmp, dst)
         record(f"CONVERT {mode} {src} -> {dst}")
 
@@ -692,6 +741,170 @@ def audio_convert(src, args, mode):
     except Exception as e:
         tmp.unlink(missing_ok=True)
         record(f"ERROR {mode} {src}: {e}", True)
+        return "error"
+
+
+# =========================================================
+# MERGE (--merge): join the videos of one folder into one MP4
+# =========================================================
+
+MERGE_AUDIO_RATE = 48000
+MERGED_NAME = re.compile(r"_merged(_\d{3})?$", re.IGNORECASE)   # outputs of an earlier run
+
+
+def natural_key(path):
+    """Case-insensitive, numeric-aware sort key: clip2 sorts before clip10."""
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", path.name)]
+
+
+def build_merge_jobs(tasks):
+    """Group (file, mode) tasks by folder: [(folder, [(file, mode), ...]), ...].
+
+    Folders with fewer than two videos are reported and left out, as are
+    outputs of an earlier merge (<folder>_merged.mp4).
+    """
+    groups = {}
+    for src, mode in tasks:
+        if not MERGED_NAME.search(src.stem):
+            groups.setdefault(src.parent, []).append((src, mode))
+
+    jobs = []
+    for folder in sorted(groups, key=lambda f: [natural_key(Path(p)) for p in f.parts]):
+        files = sorted(groups[folder], key=lambda t: natural_key(t[0]))
+        if len(files) < 2:
+            print(f"Skipping {folder}: only one video, nothing to merge")
+            record(f"SKIP {folder} (only one video)")
+        else:
+            jobs.append((folder, files))
+    return jobs
+
+
+def probe_media(src):
+    """Facts needed to merge one file, or None if ffprobe cannot read a video stream.
+
+    Returns dict(width, height, fps, has_audio, duration); width/height are
+    the displayed size (after rotation metadata), fps a Fraction.
+    """
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries",
+             "stream=codec_type,width,height,avg_frame_rate,r_frame_rate"
+             ":stream_tags=rotate:stream_side_data=rotation:format=duration",
+             "-of", "json", str(src)],
+            capture_output=True, text=True, timeout=60).stdout
+        info = json.loads(out)
+        streams = info.get("streams", [])
+        video = next(s for s in streams
+                     if s.get("codec_type") == "video" and s.get("width"))
+    except (OSError, ValueError, StopIteration, subprocess.SubprocessError):
+        return None
+
+    width, height = int(video["width"]), int(video["height"])
+    rotation = [d["rotation"] for d in video.get("side_data_list", []) if "rotation" in d]
+    try:
+        rotation.append(float(video.get("tags", {}).get("rotate", 0)))
+    except ValueError:
+        pass
+    if any(round(abs(r)) % 180 == 90 for r in rotation):
+        width, height = height, width
+
+    fps = Fraction(30)
+    for key in ("avg_frame_rate", "r_frame_rate"):
+        try:
+            cand = Fraction(video.get(key, "0"))
+        except (ValueError, ZeroDivisionError):
+            continue
+        if cand > 0:
+            fps = cand
+            break
+
+    try:
+        duration = float(info.get("format", {}).get("duration"))
+    except (TypeError, ValueError):
+        duration = None
+
+    return {"width": width, "height": height, "fps": fps, "duration": duration,
+            "has_audio": any(s.get("codec_type") == "audio" for s in streams)}
+
+
+def merge_args(infos, args):
+    """ffmpeg output args that scale/pad every input to the largest frame and concatenate."""
+    big = max(infos, key=lambda i: i["width"] * i["height"])
+    w, h = big["width"] + big["width"] % 2, big["height"] + big["height"] % 2
+    fps = max(i["fps"] for i in infos)
+
+    chains, joined = [], ""
+    for n, i in enumerate(infos):
+        chains.append(
+            f"[{n}:v:0]scale={w}:{h}:force_original_aspect_ratio=decrease,"
+            f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,"
+            f"fps={fps.numerator}/{fps.denominator},format=yuv420p[v{n}]")
+        if i["has_audio"]:
+            chains.append(f"[{n}:a:0]aresample={MERGE_AUDIO_RATE},"
+                          f"aformat=sample_fmts=fltp:channel_layouts=stereo[a{n}]")
+        else:
+            chains.append(f"anullsrc=r={MERGE_AUDIO_RATE}:cl=stereo,"
+                          f"atrim=duration={i['duration']:.3f},asetpts=PTS-STARTPTS[a{n}]")
+        joined += f"[v{n}][a{n}]"
+    chains.append(f"{joined}concat=n={len(infos)}:v=1:a=1[v][a]")
+
+    return ["-filter_complex", ";".join(chains), "-map", "[v]", "-map", "[a]",
+            *video_encoder_args(args), "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart"]
+
+
+def merge_folder(folder, files, args):
+    """Merge the videos of one folder into <folder>_merged.mp4."""
+    name = folder.resolve().name or "merged"
+    dst = reserve(folder / f"{name}_merged.mp4", args)
+    if dst is None:
+        record(f"SKIP merge {folder} (exists)")
+        return "skipped"
+
+    srcs = [src for src, _ in files]
+    progress.say(f"Merging {len(srcs)} videos in {folder} -> {dst.name}")
+    if args.dry_run:
+        record(f"DRYRUN merge {len(srcs)} files in {folder} -> {dst}: "
+               + ", ".join(s.name for s in srcs))
+        return "dryrun"
+
+    tmp = dst.with_name(dst.name + ".part")
+    try:
+        infos, usable = [], []
+        for src in srcs:
+            info = probe_media(src)
+            if info is None:
+                record(f"WARN merge: {src} is not a readable video, left out")
+            elif not info["has_audio"] and not info["duration"]:
+                record(f"WARN merge: {src} has no audio and an unknown length, left out")
+            else:
+                infos.append(info)
+                usable.append(src)
+        if len(usable) < 2:
+            raise RuntimeError("fewer than two readable videos")
+
+        durations = [i["duration"] for i in infos]
+        total = sum(durations) if all(durations) else None
+        run_ffmpeg(usable, tmp, merge_args(infos, args), "mp4", total, label=dst.name,
+                   segments=durations if total else None)
+
+        if not tmp.exists() or tmp.stat().st_size == 0:
+            raise RuntimeError("ffmpeg produced no output")
+        os.replace(tmp, dst)
+        record(f"MERGE {len(usable)} files in {folder} -> {dst}: "
+               + ", ".join(s.name for s in usable))
+
+        if args.delete_source:
+            for src in usable:
+                try:
+                    delete_source(src)
+                except OSError as e:
+                    record(f"ERROR delete {src}: {e}", True)
+        return "ok"
+
+    except Exception as e:
+        tmp.unlink(missing_ok=True)
+        record(f"ERROR merge {folder}: {e}", True)
         return "error"
 
 
@@ -746,6 +959,31 @@ def run_pipeline(tasks, args):
                 list(ex.map(lambda t: worker(t, args), batch))
 
 
+def merge_worker(job, args):
+    folder, files = job
+    status = "error"
+    try:
+        status = merge_folder(folder, files, args)
+    except Exception as e:
+        record(f"ERROR merge {folder}: {e}", True)
+    finally:
+        with lock:
+            results[status] += 1
+        progress.finish_file(folder.resolve().name or str(folder))
+    return status
+
+
+def run_merge(jobs, args):
+    _, ff_workers, load = adaptive_workers()
+    progress.unit = "merge files"
+
+    print(f"\nScheduler load={load:.2f}")
+    print(f"ffmpeg workers={ff_workers}\n")
+
+    with ThreadPoolExecutor(max_workers=ff_workers) as ex:
+        list(ex.map(lambda j: merge_worker(j, args), jobs))
+
+
 # =========================================================
 # COMMAND LINE
 # =========================================================
@@ -757,6 +995,7 @@ examples:
   mediaconv.py -r --videos --remux -d             videos -> MP4 (copy streams when possible)
   mediaconv.py -r --mkv --h265 --crf 26           MKV -> H.265 MP4
   mediaconv.py -c --mp4 --extract-audio           pull MP3 audio out of MP4 files
+  mediaconv.py -r --videos --merge                join the videos of each folder into one MP4
   mediaconv.py -r --heic --max-size 2048 -n       preview HEIC -> resized JPG
 """
 
@@ -783,7 +1022,8 @@ def build_parser():
 
     g = p.add_argument_group("format selectors")
     g.add_argument("--images", action="store_true", help="all image formats")
-    g.add_argument("--videos", action="store_true", help="all video formats (not --ts)")
+    g.add_argument("--videos", action="store_true",
+                   help="all video formats (with --merge also .mp4)")
     g.add_argument("--audio", action="store_true", help="all audio formats")
 
     for title, kind in (("image formats", "image"), ("video formats", "video"),
@@ -817,6 +1057,12 @@ def build_parser():
                    help="copy streams without re-encoding for mkv/mov/ts/m4v/3gp/mpg "
                         "(falls back to encoding if copy fails)")
 
+    g = p.add_argument_group("merge")
+    g.add_argument("-m", "-M", "--merge", action="store_true",
+                   help="join the videos of each folder (natural name order) into "
+                        "<folder>_merged.mp4; smaller videos are scaled to fit the largest "
+                        "frame and padded with black, frame rates are matched to the highest")
+
     g = p.add_argument_group("audio options")
     g.add_argument("--audio-to", choices=("mp3", "aac"), default="mp3",
                    help="audio target: mp3, or aac in .m4a (default: mp3)")
@@ -830,7 +1076,8 @@ def build_parser():
     g.add_argument("-s", "-S", "--skip-existing", action="store_true",
                    help="skip when output already exists")
     g.add_argument("-d", "-D", "--delete-source", action="store_true",
-                   help="delete the source after a successful conversion")
+                   help="delete the source after a successful conversion "
+                        "(with --merge: after a successful merge, after a warning)")
     g.add_argument("-n", "-N", "--dry-run", action="store_true", help="simulate only")
     g.add_argument("-l", "-L", "--log", action="store_true",
                    help=f"write the activity log ({LOG_FILE}); "
@@ -859,7 +1106,7 @@ def expand_modes(args):
         modes += IMAGE_GROUP if args.image_to == "jpg" else \
             [m for m in IMAGE_GROUP if m != "webp"] + ["jpg"]
     if args.videos:
-        modes += VIDEO_GROUP + (["mp4"] if args.extract_audio else [])
+        modes += VIDEO_GROUP + (["mp4"] if args.extract_audio or args.merge else [])
     if args.audio:
         modes += [m for m in AUDIO_GROUP if not (m == "m4a" and args.audio_to == "aac")]
     modes = list(dict.fromkeys(modes))
@@ -874,8 +1121,16 @@ def expand_modes(args):
         raise ValueError("--jpeg only renames to .jpg; use --jpg with --image-to webp")
     if "m4a" in modes and args.audio_to == "aac":
         raise ValueError("--m4a as a source cannot be combined with --audio-to aac")
-    if "mp4" in modes and not args.extract_audio:
-        raise ValueError("--mp4 is only a source for --extract-audio")
+    if "mp4" in modes and not (args.extract_audio or args.merge):
+        raise ValueError("--mp4 is only a source for --extract-audio or --merge")
+    if args.merge:
+        if args.extract_audio:
+            raise ValueError("--merge cannot be combined with --extract-audio")
+        if args.remux:
+            raise ValueError("--merge always re-encodes; --remux does not apply")
+        if not any(MODES[m][1] == "video" for m in modes) or \
+                any(MODES[m][1] != "video" for m in modes):
+            raise ValueError("--merge works on video formats only (e.g. --videos, --mkv)")
     if args.extract_audio and not any(MODES[m][1] == "video" for m in modes):
         raise ValueError("--extract-audio needs a video selector (e.g. --mp4, --mkv, --videos)")
     if args.overwrite and args.skip_existing:
@@ -913,6 +1168,21 @@ def main():
         print("No matching files found.")
         return 0
 
+    jobs = None
+    if args.merge:
+        jobs = build_merge_jobs(tasks)
+        if not jobs:
+            print("No folder with at least two videos found.")
+            return 0
+        tasks = [t for _, files in jobs for t in files]
+
+        if args.delete_source:
+            print(f"\nWARNING: --merge with -d deletes up to {len(tasks)} source videos "
+                  "after their folder has been merged successfully.")
+            if not args.dry_run and not confirm_delete("Delete the merged source files?", args):
+                print("Cancelled; nothing was merged or deleted.")
+                return 1
+
     if not args.dry_run:
         needed = {m for _, m in tasks}
         if not ensure_prerequisites(needed, args):
@@ -920,12 +1190,18 @@ def main():
             return 1
 
     print_file_summary(tasks)
-    progress.total = len(tasks)
-    run_pipeline(tasks, args)
+    if jobs is not None:
+        print(f"{len(jobs)} merge jobs")
+        progress.total = len(jobs)
+        run_merge(jobs, args)
+    else:
+        progress.total = len(tasks)
+        run_pipeline(tasks, args)
     progress.close()
 
     summary = ", ".join(f"{v} {k}" for k, v in sorted(results.items()))
-    print(f"\nDone. Processed {progress.done} files ({summary}).")
+    unit = "merge jobs" if jobs is not None else "files"
+    print(f"\nDone. Processed {progress.done} {unit} ({summary}).")
     record(f"Done. {summary}")
 
     return 1 if results["error"] else 0
