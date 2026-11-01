@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
 mediaconv.py
-Version: 2026-10-28 v5.3
+Version: 2026-11-01 v5.4
 
 Adaptive media converter (images, video, audio).
 
+- scan progress with -r: "N eligible files found" for every 100 folders scanned,
+  and a "N folders scanned" tally in the summary
 - per-type file summary (console + optional log)
 - live overall progress ("x of y files processed") and per-video percent
 - adaptive CPU scheduler, image/ffmpeg job separation
@@ -31,8 +33,8 @@ from fractions import Fraction
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
-VERSION = "5.3"
-VERSION_DATE = "2026-10-28"
+VERSION = "5.4"
+VERSION_DATE = "2026-11-01"
 VERSION_TEXT = f"mediaconv.py v{VERSION} ({VERSION_DATE})"
 
 Image = ImageOps = None     # Pillow, loaded on demand by ensure_prerequisites()
@@ -463,16 +465,31 @@ def collect(modes, recursive):
     for m in modes:
         for s in MODES[m][0]:
             by_suffix.setdefault(s, []).append(m)
-    base = Path(".")
-    entries = base.rglob("*") if recursive else base.glob("*")
-    return [(f, m)
-            for f in entries
-            if f.suffix.lower() in by_suffix and f.is_file()
-            for m in by_suffix[f.suffix.lower()]]
+    tasks = []
+    found = scanned = 0
+    for root, dirs, names in os.walk("."):
+        if not recursive:
+            dirs.clear()
+        for name in names:
+            f = Path(root, name)
+            ms = by_suffix.get(f.suffix.lower())
+            if ms:
+                found += 1
+                tasks.extend((f, m) for m in ms)
+        scanned += 1
+        if recursive and scanned % 100 == 0:
+            progress.say(f"{found} eligible files found ({scanned} folders scanned)")
+    return tasks, scanned
 
 
-def print_file_summary(tasks):
+def print_file_summary(tasks, scanned):
     counts = Counter(mode for _, mode in tasks)
+
+    print("\n---- Scan summary ----\n")
+
+    msg = f"{scanned} folders scanned"
+    print(msg)
+    record(msg)
 
     for k in sorted(counts):
         msg = f"{counts[k]} {k.upper()} files"
@@ -1212,7 +1229,7 @@ def main():
     if not modes:
         parser.error("select at least one format (e.g. --png, --images; see --help)")
 
-    tasks = collect(modes, args.recursive)
+    tasks, scanned = collect(modes, args.recursive)
 
     if not tasks:
         print("No matching files found.")
@@ -1239,7 +1256,7 @@ def main():
             print("Missing prerequisites; nothing was converted (see --check, --yes).")
             return 1
 
-    print_file_summary(tasks)
+    print_file_summary(tasks, scanned)
     if jobs is not None:
         print(f"{len(jobs)} merge jobs")
         progress.total = len(jobs)
