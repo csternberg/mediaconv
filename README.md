@@ -51,6 +51,7 @@ python mediaconv.py (-c | -r) [format switches] [options]
 | | `--hw {nvenc,qsv,amf}` | hardware encoder |
 | | `--remux` | copy streams, no re-encode, for mkv/mov/ts/m4v/3gp/mpg |
 | Merge | `-m`, `--merge` | join the videos of each folder into `<folder>_merged.mp4` (see below) |
+| Cleanup | `--cleanup {delete,save}` | convert nothing; remove sources that already have a converted file (see below) |
 | Audio | `--audio-to {mp3,aac}` | target (default `mp3`; `aac` writes `.m4a`) |
 | | `--abitrate RATE` | bitrate (default `192k`) |
 | | `--extract-audio` | video sources produce audio files |
@@ -77,16 +78,19 @@ python mediaconv.py -r --mkv --h265 --crf 26         # MKV -> H.265 MP4
 python mediaconv.py -c --audio --audio-to aac        # audio -> .m4a
 python mediaconv.py -c --mp4 --extract-audio         # MP3 from MP4 files
 python mediaconv.py -r --videos --merge              # one MP4 per folder
+python mediaconv.py -r --videos --cleanup save       # move already converted videos to .\cleanup
 python mediaconv.py -r --heic --max-size 2048 -n     # preview HEIC -> resized JPG
 ```
 
 ## Behavior
 
 - Extensions match case-insensitively.
+- Trash and system folders are skipped silently, at any depth: `$RECYCLE.BIN`, `RECYCLER`, `System Volume Information`, `.Trashes` and `.Trash*` (e.g. `.Trash`, `.Trash-1000`). They are not counted as scanned folders.
 - Images: EXIF orientation is applied, EXIF/GPS is preserved unless `--strip-metadata`, transparency becomes white for JPG and is kept for WebP.
 - Video: `libx264` (or `libx265`), AAC audio, `yuv420p`, `+faststart`, subtitles dropped, odd dimensions rounded to even.
 - `--merge` joins the videos of each folder (with `-r`, each subfolder separately) into `<folder>_merged.mp4` in that folder, in natural name order (`clip2` before `clip10`). `--videos` then also includes `.mp4`; earlier `*_merged.mp4` outputs are ignored. All clips are scaled to fit the largest frame (by area) keeping their aspect ratio and padded with black where needed, in one or both dimensions; frame rate is matched to the highest, audio is converted to a common format, and clips without audio get silence. Folders with a single video are skipped. Merging always re-encodes (no `--remux`) and needs `ffprobe`. Files ffprobe cannot read as video are left out of the merge and kept.
 - `--merge` with `-d` prints a warning with the number of source files and asks for confirmation (`--yes` skips the question); declining cancels the run. Sources are deleted only after their folder merged successfully.
+- `--cleanup delete|save` converts nothing. It scans like a normal run (same format switches, `-c`/`-r`) and removes each selected source that already has a converted file next to it: same name with the target extension, non-empty (`myvideo.wmv` is removed when `myvideo.mp4` exists). `delete` prints a warning with the number of files and asks for confirmation (`--yes` skips the question). `save` asks nothing and moves the files into a `cleanup` folder in the folder where mediaconv was started, keeping the folder tree (`sub/a.wmv` becomes `cleanup/sub/a.wmv`), so they are easy to put back; a name already present there gets `_001` appended. Combine with `-n` to preview. Not combinable with `--merge`, `-d`, `-o` or `-s`. Only the exact name is checked, so a converted file renamed to `myvideo_001.mp4` by a name conflict does not count, and an empty converted file does not either. If two sources share one converted file (`clip.wmv` and `clip.avi` both map to `clip.mp4`), both are skipped. Each of these cases prints a `WARNING:` line and is appended, with the full path and an explanation, to `cleanup_warnings.log` in the start folder (created only when there is a warning; also written with `-n`). A gif with both `--gifv` and `--gifi` needs both outputs. The top-level `cleanup` folder is never scanned (also in normal runs), so saved files are not converted again.
 - `--remux` copies a file's video (and audio, when MP4-compatible) without re-encoding. If the codecs do not fit MP4, or the copy fails, that file is re-encoded instead. This needs `ffprobe`.
 - Output is written to a `.part` file and moved into place only on success, so failures never leave truncated results.
 - The source is deleted (`-d`) only after a verified successful conversion; a non-zero ffmpeg exit counts as failure.
@@ -97,6 +101,7 @@ python mediaconv.py -r --heic --max-size 2048 -n     # preview HEIC -> resized J
 - Console: per-type file counts, a `Processing:` line per file, and a final summary. On a terminal a live status line shows `x of y files processed` plus the percent done of each active ffmpeg job (percent needs `ffprobe`). With `--merge` the count is of merge files (one per folder) and each active job also shows which input is being added, e.g. `clips_merged.mp4  40% (adding file 2/5)`. When output is redirected, one `[x/y] name` line is printed per finished file instead.
 - Errors are always printed to stderr.
 - `mediaconv.errors.log` is written whenever an error occurs, with or without `-l`. It is created on the first error, so it exists only if something failed.
+- `cleanup_warnings.log` is appended to when `--cleanup` keeps or skips a source for a reason worth a look (exact-name misses, empty converted files, shared converted files). It is created on the first warning.
 - With `-l`, `mediaconv.log` (summary and every action) is also written. Without `-l` it is not created.
 - A malformed command line prints the version, a short usage line and the error; `-h` prints the full help.
 

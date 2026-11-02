@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 mediaconv.py
-Version: 2026-11-01 v5.4
+Version: 2026-11-02 v5.5
 
 Adaptive media converter (images, video, audio).
 
@@ -14,6 +14,8 @@ Adaptive media converter (images, video, audio).
 - global conflict-safe naming
 - offers to install missing prerequisites (Pillow, pillow-heif, ffmpeg)
 - --merge joins the videos of each folder into one MP4 (resized/padded to the largest)
+- --cleanup delete|save removes sources that already have a converted file next to them
+  (delete, or move to ./cleanup keeping the folder tree); no conversion is done
 
 Run with --help for the full switch list.
 """
@@ -28,13 +30,14 @@ import argparse
 import importlib
 import subprocess
 import threading
+import time
 from pathlib import Path
 from fractions import Fraction
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
-VERSION = "5.4"
-VERSION_DATE = "2026-11-01"
+VERSION = "5.5"
+VERSION_DATE = "2026-11-02"
 VERSION_TEXT = f"mediaconv.py v{VERSION} ({VERSION_DATE})"
 
 Image = ImageOps = None     # Pillow, loaded on demand by ensure_prerequisites()
@@ -100,6 +103,8 @@ OUT_TIME = re.compile(r"out_time_us=(\d+)")
 
 LOG_FILE = "mediaconv.log"
 ERR_FILE = "mediaconv.errors.log"
+CLEANUP_DIR = "cleanup"             # --cleanup save target; never scanned (start folder only)
+CLEANUP_WARN_FILE = "cleanup_warnings.log"
 
 lock = threading.Lock()
 results = Counter()
@@ -459,6 +464,17 @@ def resolve_target(src: Path, suffix: str, args):
 # FILE COLLECTION
 # =========================================================
 
+SKIPPED_DIRS = {"$recycle.bin", "recycler", "system volume information", ".trashes"}
+
+
+def skipped_dir(name, parent):
+    """True for trash/system folders (silently never scanned) and for the
+    --cleanup save folder in the start folder (saved files must not be converted again)."""
+    low = name.lower()
+    return (low in SKIPPED_DIRS or low.startswith(".trash")
+            or (parent == "." and low == CLEANUP_DIR))
+
+
 def collect(modes, recursive):
     """Single directory walk; suffix match is case-insensitive."""
     by_suffix = {}
@@ -470,6 +486,8 @@ def collect(modes, recursive):
     for root, dirs, names in os.walk("."):
         if not recursive:
             dirs.clear()
+        else:
+            dirs[:] = [d for d in dirs if not skipped_dir(d, root)]
         for name in names:
             f = Path(root, name)
             ms = by_suffix.get(f.suffix.lower())
@@ -1052,6 +1070,143 @@ def run_merge(jobs, args):
 
 
 # =========================================================
+# CLEANUP (--cleanup): remove sources whose converted file already exists
+# =========================================================
+
+def converted_exists(dst: Path, src: Path):
+    """True if dst is a non-empty file and not the source itself."""
+    try:
+        return dst.is_file() and dst.stat().st_size > 0 and not os.path.samefile(src, dst)
+    except OSError:
+        return False
+
+
+def missing_note(dst: Path):
+    """Why a source is kept although a related file exists, or None."""
+    try:
+        if dst.is_file() and dst.stat().st_size == 0:
+            return f"converted file {dst.name} is empty; source kept"
+        variants = sorted(dst.parent.glob(
+            f"{glob.escape(dst.stem)}_[0-9][0-9][0-9]{glob.escape(dst.suffix)}"))
+    except OSError:
+        return None
+    if variants:
+        return (f"no file named {dst.name}, but {', '.join(v.name for v in variants)} exists "
+                "(renamed after a name conflict?); only the exact name counts, source kept")
+    return None
+
+
+def plan_cleanup(tasks, args):
+    """Split the collected sources into (removable, kept, ambiguous, notes).
+
+    A source is removable when the converted file of every mode that applies
+    to it exists. Sources that share one converted file (clip.wmv and clip.avi
+    both -> clip.mp4) are ambiguous: the file may come from only one of them.
+    notes is a list of (source, explanation) for the warning log.
+    """
+    wanted = {}                         # src -> converted paths
+    for src, mode in tasks:
+        wanted.setdefault(src, set()).add(src.with_suffix(target_suffix(mode, args)))
+
+    owners = {}                         # converted path -> sources mapping to it
+    for src, dsts in wanted.items():
+        for dst in dsts:
+            owners.setdefault(dst, set()).add(src)
+
+    removable, kept, ambiguous, notes = [], [], [], []
+    for src, dsts in wanted.items():
+        missing = [d for d in sorted(dsts) if not converted_exists(d, src)]
+        if missing:
+            kept.append(src)
+            notes += [(src, n) for n in map(missing_note, missing) if n]
+        elif any(len(owners[d]) > 1 for d in dsts):
+            ambiguous.append(src)
+            for d in sorted(dsts):
+                others = sorted(owners[d] - {src})
+                if others:
+                    notes.append((src, f"shares its converted file {d.name} with "
+                                  + ", ".join(str(o.resolve()) for o in others)
+                                  + "; skipped, delete or move it by hand if it is obsolete"))
+        else:
+            removable.append((src, sorted(dsts)))
+    return removable, kept, ambiguous, notes
+
+
+def report_cleanup_warnings(notes, args):
+    """Print each warning and append it, with the full path, to CLEANUP_WARN_FILE."""
+    if not notes:
+        return
+    lines = [f"{src.resolve()}: {text}" for src, text in notes]
+    for line in lines:
+        print(f"WARNING: {line}")
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    with lock:
+        with open(CLEANUP_WARN_FILE, "a", encoding="utf-8") as f:
+            f.write(f"# {stamp} {VERSION_TEXT} --cleanup {args.cleanup}"
+                    f"{' (dry run)' if args.dry_run else ''}\n")
+            f.write("\n".join(lines) + "\n")
+
+
+def cleanup_source(src, converted, args):
+    """Delete src, or move it below CLEANUP_DIR keeping its folder tree.
+
+    Returns ok, dryrun or error. A move is one os.replace (atomic on one
+    volume); across volumes it fails and the source stays where it is.
+    """
+    save = args.cleanup == "save"
+    try:
+        dest = unique(Path(CLEANUP_DIR) / src) if save else None
+        if args.dry_run:
+            print(f"Would move: {src} -> {dest}" if save else f"Would delete: {src}")
+            record(f"DRYRUN cleanup {args.cleanup} {src}")
+            return "dryrun"
+        if save:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(src, dest)
+            record(f"CLEANUP MOVE {src} -> {dest} (converted: "
+                   + ", ".join(p.name for p in converted) + ")")
+            print(f"Moved: {src} -> {dest}")
+        else:
+            delete_source(src)
+            print(f"Deleted: {src}")
+        return "ok"
+    except OSError as e:
+        record(f"ERROR cleanup {src}: {e}", True)
+        return "error"
+
+
+def run_cleanup(tasks, args):
+    removable, kept, ambiguous, notes = plan_cleanup(tasks, args)
+
+    report_cleanup_warnings(notes, args)
+    for src in kept:
+        record(f"KEEP {src} (no converted file)")
+
+    if removable and args.cleanup == "delete" and not args.dry_run:
+        print(f"\nWARNING: --cleanup delete will delete {len(removable)} source files "
+              "that have a converted file.")
+        if not confirm_delete("Delete these source files?", args):
+            print("Cancelled; nothing was deleted.")
+            return 1
+        print()
+
+    done = Counter(cleanup_source(src, conv, args) for src, conv in removable)
+
+    verb = "deleted" if args.cleanup == "delete" else "moved"
+    if args.dry_run:
+        verb = "would be " + verb
+    msg = (f"Cleanup done. {done['ok'] + done['dryrun']} {verb}, "
+           f"{len(kept)} kept (no converted file), "
+           f"{len(ambiguous)} skipped (shared converted file), {done['error']} errors.")
+    print()
+    print(msg)
+    record(msg)
+    if notes:
+        print(f"{len(notes)} warnings, see {CLEANUP_WARN_FILE}")
+    return 1 if done["error"] else 0
+
+
+# =========================================================
 # COMMAND LINE
 # =========================================================
 
@@ -1063,6 +1218,7 @@ examples:
   mediaconv.py -r --mkv --h265 --crf 26           MKV -> H.265 MP4
   mediaconv.py -c --mp4 --extract-audio           pull MP3 audio out of MP4 files
   mediaconv.py -r --videos --merge                join the videos of each folder into one MP4
+  mediaconv.py -r --videos --cleanup save         move already converted sources to ./cleanup
   mediaconv.py -r --heic --max-size 2048 -n       preview HEIC -> resized JPG
 """
 
@@ -1129,6 +1285,13 @@ def build_parser():
                    help="join the videos of each folder (natural name order) into "
                         "<folder>_merged.mp4; smaller videos are scaled to fit the largest "
                         "frame and padded with black, frame rates are matched to the highest")
+
+    g = p.add_argument_group("cleanup")
+    g.add_argument("--cleanup", choices=("delete", "save"),
+                   help="convert nothing; remove the selected sources that already have a "
+                        "converted file next to them (same name, target extension): "
+                        f"delete them, or save = move them to ./{CLEANUP_DIR} keeping the "
+                        "folder tree")
 
     g = p.add_argument_group("audio options")
     g.add_argument("--audio-to", choices=("mp3", "aac"), default="mp3",
@@ -1198,6 +1361,13 @@ def expand_modes(args):
         if not any(MODES[m][1] == "video" for m in modes) or \
                 any(MODES[m][1] != "video" for m in modes):
             raise ValueError("--merge works on video formats only (e.g. --videos, --mkv)")
+    if args.cleanup:
+        if args.merge:
+            raise ValueError("--cleanup cannot be combined with --merge")
+        if args.delete_source:
+            raise ValueError("--cleanup cannot be combined with -d (it removes sources itself)")
+        if args.overwrite or args.skip_existing:
+            raise ValueError("--cleanup converts nothing; -o and -s do not apply")
     if args.extract_audio and not any(MODES[m][1] == "video" for m in modes):
         raise ValueError("--extract-audio needs a video selector (e.g. --mp4, --mkv, --videos)")
     if args.overwrite and args.skip_existing:
@@ -1234,6 +1404,11 @@ def main():
     if not tasks:
         print("No matching files found.")
         return 0
+
+    if args.cleanup:
+        print_file_summary(tasks, scanned)
+        print()
+        return run_cleanup(tasks, args)
 
     jobs = None
     if args.merge:

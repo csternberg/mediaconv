@@ -1,4 +1,4 @@
-.TH MEDIACONV 1 "2026-11-01" "mediaconv 5.4" "User Commands"
+.TH MEDIACONV 1 "2026-11-02" "mediaconv 5.5" "User Commands"
 .SH NAME
 mediaconv \- batch-convert images, video and audio to widely compatible formats
 .SH SYNOPSIS
@@ -15,6 +15,15 @@ Images are handled with Pillow, video and audio with ffmpeg.
 Work is spread over threads, with the worker count chosen from the system load.
 .PP
 Source files are matched by extension, case-insensitively.
+Trash and system folders are skipped silently at any depth:
+.IR $RECYCLE.BIN ,
+.IR RECYCLER ,
+.IR "System Volume Information" ,
+.I .Trashes
+and
+.I .Trash*
+(for example
+.IR .Trash-1000 ).
 Output is written next to the source file.
 Each output is first written to a temporary
 .I .part
@@ -260,6 +269,67 @@ unless
 .B \-\-yes
 is given; declining cancels the run.
 Sources are deleted only after their folder was merged successfully.
+.SH CLEANUP
+.TP
+.BI \-\-cleanup " delete" "|" save
+Convert nothing.
+Scan like a normal run (same format switches and scope) and remove each
+selected source that already has a converted file next to it: the same name
+with the target extension, non-empty.
+.I myvideo.wmv
+is removed when
+.I myvideo.mp4
+exists.
+.B delete
+prints a warning with the number of files and asks for confirmation
+.RB ( \-\-yes
+skips the question).
+.B save
+asks nothing and moves the files into a folder
+.I cleanup
+in the folder where mediaconv was started, keeping the folder tree
+.RI ( sub/a.wmv
+becomes
+.IR cleanup/sub/a.wmv ),
+so they are easy to restore.
+A name already present there gets
+.I _001
+appended.
+Use
+.B \-\-dry\-run
+to preview.
+.PP
+Only the exact name is checked: a converted file renamed
+.I myvideo_001.mp4
+by a name conflict does not count, and neither does an empty converted file.
+If two sources share one converted file
+.RI ( clip.wmv
+and
+.I clip.avi
+both map to
+.IR clip.mp4 ),
+both are skipped.
+Each of these cases prints a
+.B WARNING:
+line and is appended, with the full path and an explanation, to
+.I cleanup_warnings.log
+in the start folder (created only when there is a warning; also written with
+.BR \-\-dry\-run ).
+A gif selected with both
+.B \-\-gifv
+and
+.B \-\-gifi
+needs both outputs.
+.B \-\-cleanup
+cannot be combined with
+.BR \-\-merge ,
+.BR \-d ,
+.B \-o
+or
+.BR \-s .
+The top-level
+.I cleanup
+folder is never scanned, also in normal runs, so saved files are not converted again.
 .SH AUDIO OPTIONS
 .TP
 .BI \-\-audio\-to " FORMAT"
@@ -377,6 +447,11 @@ Created on the first error, so it exists only if something failed.
 .I mediaconv.log
 Written in the working directory only with
 .BR \-\-log .
+.TP
+.I cleanup_warnings.log
+Written in the working directory when
+.B \-\-cleanup
+finds sources it keeps or skips for a reason worth a look (appended to).
 .SH EXIT STATUS
 .TP
 .B 0
@@ -425,6 +500,14 @@ Extract MP3 audio from MP4 files:
 .RS
 .nf
 mediaconv.py \-c \-\-mp4 \-\-extract\-audio
+.fi
+.RE
+.PP
+Move videos that already have an MP4 next to them into ./cleanup:
+.PP
+.RS
+.nf
+mediaconv.py \-r \-\-videos \-\-cleanup save
 .fi
 .RE
 .PP
