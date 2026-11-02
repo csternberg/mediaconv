@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 mediaconv.py
-Version: 2026-11-02 v5.5
+Version: 2026-11-02 v5.6
 
 Adaptive media converter (images, video, audio).
 
@@ -15,7 +15,9 @@ Adaptive media converter (images, video, audio).
 - offers to install missing prerequisites (Pillow, pillow-heif, ffmpeg)
 - --merge joins the videos of each folder into one MP4 (resized/padded to the largest)
 - --cleanup delete|save removes sources that already have a converted file next to them
-  (delete, or move to ./cleanup keeping the folder tree); no conversion is done
+  (delete, or move to ./cleanup keeping the folder tree); no conversion is done.
+  Clashing names (clip.wmv, clip.avi, clip.mp4, clip_001.mp4) are paired by size and
+  duration (images: size and a small fingerprint); --verify does this for every file
 
 Run with --help for the full switch list.
 """
@@ -36,7 +38,7 @@ from fractions import Fraction
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
-VERSION = "5.5"
+VERSION = "5.6"
 VERSION_DATE = "2026-11-02"
 VERSION_TEXT = f"mediaconv.py v{VERSION} ({VERSION_DATE})"
 
@@ -1082,53 +1084,233 @@ def converted_exists(dst: Path, src: Path):
 
 
 def missing_note(dst: Path):
-    """Why a source is kept although a related file exists, or None."""
+    """Why a source is kept although a file of the converted name exists, or None."""
     try:
         if dst.is_file() and dst.stat().st_size == 0:
             return f"converted file {dst.name} is empty; source kept"
-        variants = sorted(dst.parent.glob(
-            f"{glob.escape(dst.stem)}_[0-9][0-9][0-9]{glob.escape(dst.suffix)}"))
     except OSError:
-        return None
-    if variants:
-        return (f"no file named {dst.name}, but {', '.join(v.name for v in variants)} exists "
-                "(renamed after a name conflict?); only the exact name counts, source kept")
+        pass
     return None
+
+
+CLEANUP_NNN = re.compile(r"_\d{3}$")
+IMAGE_TOLERANCE = 16.0          # mean luma difference (0-255) of the 8x8 fingerprints
+TIME_FLOOR, IMAGE_FLOOR = 0.05, 4.0     # extra margin the runner-up needs (s / luma)
+
+
+def cleanup_key(stem):
+    """Case-folded name without a trailing _NNN conflict suffix."""
+    return (CLEANUP_NNN.sub("", stem) or stem).casefold()
+
+
+def cleanup_kind(suffix):
+    """What to compare for a converted file: audio (duration), video or image."""
+    suffix = suffix.lower()
+    return "audio" if suffix in (".mp3", ".m4a") else "video" if suffix == ".mp4" else "image"
+
+
+def duration_of(path):
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=nw=1:nk=1", cli_path(path)],
+            capture_output=True, text=True, timeout=60).stdout
+        return float(out.strip())
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def cleanup_facts(path, kind):
+    """Metadata used to pair a source with its converted file, or None if unreadable.
+
+    audio: duration. video: displayed size and duration. image: displayed size
+    (EXIF orientation applied) and an 8x8 grayscale fingerprint.
+    """
+    if kind != "image":
+        if not shutil.which("ffprobe"):
+            return None
+        if kind == "audio":
+            d = duration_of(path)
+            return None if d is None else {"duration": d}
+        info = probe_media(path)
+        if not info or info["duration"] is None:
+            return None
+        return {"size": (info["width"], info["height"]), "duration": info["duration"]}
+    try:
+        from PIL import Image, ImageOps
+        with Image.open(path) as im:
+            w, h = im.size
+            if im.getexif().get(0x0112, 1) in (5, 6, 7, 8):
+                w, h = h, w
+            im.draft("L", (64, 64))
+            im = ImageOps.exif_transpose(im)
+            if im.mode in ("RGBA", "LA", "P"):
+                im = im.convert("RGBA")
+                im = Image.alpha_composite(Image.new("RGBA", im.size, "white"), im)
+            return {"size": (w, h),
+                    "print": list(im.convert("L").resize((8, 8), Image.BOX).getdata())}
+    except Exception:
+        return None
+
+
+def cleanup_cost(a, b):
+    """Distance between two files' metadata, or None if they cannot be the same content."""
+    if a.get("size") != b.get("size"):
+        return None
+    if "duration" in a:
+        diff = abs(a["duration"] - b["duration"])
+        return diff if diff <= max(0.5, 0.01 * max(a["duration"], b["duration"])) else None
+    diff = sum(abs(x - y) for x, y in zip(a["print"], b["print"])) / 64
+    return diff if diff <= IMAGE_TOLERANCE else None
+
+
+def describe_facts(f):
+    parts = []
+    if f.get("size"):
+        parts.append("%dx%d" % f["size"])
+    if "duration" in f:
+        parts.append(f"{f['duration']:.1f} s")
+    return ", ".join(parts)
+
+
+def pair_by_metadata(sources, cands, facts):
+    """Pair sources with converted files whose metadata agrees.
+
+    A pair is made only when it is the clear best choice for both sides (the
+    runner-up must be clearly worse), so look-alikes are never guessed.
+    Returns (pairs {source: converted}, why {source: reason it was not paired}).
+    """
+    cost = {}
+    for s in sources:
+        for c in cands:
+            if facts.get(s) and facts.get(c):
+                x = cleanup_cost(facts[s], facts[c])
+                if x is not None:
+                    cost[(s, c)] = x
+
+    floor = TIME_FLOOR if any("duration" in f for f in facts.values() if f) else IMAGE_FLOOR
+
+    def clear(ranked):
+        return len(ranked) < 2 or ranked[1] > 2 * ranked[0] + floor
+
+    pairs, why = {}, {}
+    for s in sources:
+        mine = sorted((cost[(s, c)], c) for c in cands if (s, c) in cost)
+        if not facts.get(s):
+            why[s] = ("metadata could not be read (unreadable file, or ffprobe/Pillow "
+                      "missing); source kept")
+        elif not mine:
+            seen = ", ".join(f"{c.name} ({describe_facts(facts[c])})"
+                             for c in cands if facts.get(c))
+            why[s] = (f"no converted file matches its metadata ({describe_facts(facts[s])}); "
+                      f"candidates: {seen or 'none readable'}; source kept")
+        elif not clear([x for x, _ in mine]):
+            why[s] = ("metadata cannot tell it apart from the converted files "
+                      + ", ".join(c.name for _, c in mine) + "; source kept")
+        else:
+            c = mine[0][1]
+            theirs = sorted(cost[(o, c)] for o in sources if (o, c) in cost)
+            if theirs[0] == cost[(s, c)] and clear(theirs):
+                pairs[s] = c
+            else:
+                others = [o.name for o in sources if o != s and (o, c) in cost]
+                why[s] = f"{c.name} fits it as well as {', '.join(others)}; source kept"
+    return pairs, why
+
+
+def renamed_stem(src, converted):
+    """Name stem for a saved source: that of its converted file, when they differ."""
+    stems = {c.stem for c in converted}
+    if len(stems) == 1:
+        stem = stems.pop()
+        if stem.casefold() != src.stem.casefold():
+            return stem
+    return src.stem
 
 
 def plan_cleanup(tasks, args):
     """Split the collected sources into (removable, kept, ambiguous, notes).
 
-    A source is removable when the converted file of every mode that applies
-    to it exists. Sources that share one converted file (clip.wmv and clip.avi
-    both -> clip.mp4) are ambiguous: the file may come from only one of them.
-    notes is a list of (source, explanation) for the warning log.
+    removable is a list of (source, converted files, name stem to save under).
+    A source is removable when every converted file it needs was found.
+    Normally that is the exact name (clip.wmv -> clip.mp4). When several
+    sources or converted files share a name once a _NNN suffix is ignored
+    (clip.wmv, clip.avi, clip.mp4, clip_001.mp4), or with --verify, they are
+    paired by metadata instead (see cleanup_facts). Sources without a clear
+    partner are ambiguous. notes is a list of (source, explanation) for the
+    warning log.
     """
     wanted = {}                         # src -> converted paths
     for src, mode in tasks:
         wanted.setdefault(src, set()).add(src.with_suffix(target_suffix(mode, args)))
 
-    owners = {}                         # converted path -> sources mapping to it
+    buckets = {}                        # (folder, name, suffix) -> sources
     for src, dsts in wanted.items():
         for dst in dsts:
-            owners.setdefault(dst, set()).add(src)
+            key = (src.parent, cleanup_key(src.stem), dst.suffix.lower())
+            buckets.setdefault(key, []).append(src)
+
+    listings, jobs = {}, []
+    got, nofile, unclear = {}, {}, {}   # got[src][suffix] = converted file
+    for (folder, key, suf), srcs in sorted(buckets.items()):
+        if folder not in listings:
+            try:
+                listings[folder] = os.listdir(folder)
+            except OSError:
+                listings[folder] = []
+        own = {os.path.normcase(os.path.abspath(s)) for s in srcs}
+        pat = re.compile(re.escape(key) + r"(_\d{3})?" + re.escape(suf), re.I)
+        cands = []
+        for name in listings[folder]:
+            path = folder / name
+            try:
+                if (pat.fullmatch(name) and path.is_file() and path.stat().st_size > 0
+                        and os.path.normcase(os.path.abspath(path)) not in own):
+                    cands.append(path)
+            except OSError:
+                pass
+        if not cands:
+            for s in srcs:
+                nofile.setdefault(s, []).append(missing_note(s.with_suffix(suf)))
+        elif (len(srcs) == 1 and len(cands) == 1 and not args.verify
+              and os.path.normcase(cands[0].name)
+              == os.path.normcase(srcs[0].with_suffix(suf).name)):
+            got.setdefault(srcs[0], {})[suf] = cands[0]
+        else:
+            jobs.append((srcs, cands, suf))
+
+    need = sorted({(p, cleanup_kind(suf)) for srcs, cands, suf in jobs for p in srcs + cands},
+                  key=str)
+    if need:
+        print(f"Comparing the metadata of {len(need)} files in {len(jobs)} groups ...")
+        if any(kind == "image" for _, kind in need):
+            try:
+                importlib.import_module("pillow_heif").register_heif_opener()
+            except (ImportError, AttributeError):
+                pass
+        with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 4)) as ex:
+            facts = dict(zip(need, ex.map(lambda k: cleanup_facts(*k), need)))
+        for srcs, cands, suf in jobs:
+            kind = cleanup_kind(suf)
+            pairs, why = pair_by_metadata(srcs, cands,
+                                          {p: facts[(p, kind)] for p in srcs + cands})
+            for s in srcs:
+                if s in pairs:
+                    got.setdefault(s, {})[suf] = pairs[s]
+                    record(f"MATCH {s} <-> {pairs[s].name} ({describe_facts(facts[(s, kind)])})")
+                else:
+                    unclear.setdefault(s, []).append(why[s])
 
     removable, kept, ambiguous, notes = [], [], [], []
-    for src, dsts in wanted.items():
-        missing = [d for d in sorted(dsts) if not converted_exists(d, src)]
-        if missing:
+    for src in wanted:
+        notes += [(src, n) for n in nofile.get(src, []) + unclear.get(src, []) if n]
+        if src in nofile:
             kept.append(src)
-            notes += [(src, n) for n in map(missing_note, missing) if n]
-        elif any(len(owners[d]) > 1 for d in dsts):
+        elif src in unclear:
             ambiguous.append(src)
-            for d in sorted(dsts):
-                others = sorted(owners[d] - {src})
-                if others:
-                    notes.append((src, f"shares its converted file {d.name} with "
-                                  + ", ".join(str(o.resolve()) for o in others)
-                                  + "; skipped, delete or move it by hand if it is obsolete"))
         else:
-            removable.append((src, sorted(dsts)))
+            converted = [got[src][k] for k in sorted(got[src])]
+            removable.append((src, converted, renamed_stem(src, converted)))
     return removable, kept, ambiguous, notes
 
 
@@ -1147,15 +1329,18 @@ def report_cleanup_warnings(notes, args):
             f.write("\n".join(lines) + "\n")
 
 
-def cleanup_source(src, converted, args):
+def cleanup_source(src, converted, stem, args):
     """Delete src, or move it below CLEANUP_DIR keeping its folder tree.
+
+    The saved copy is named stem + the source's extension (the converted file's
+    name when it was paired by metadata, e.g. clip.mpg -> clip_001.mpg).
 
     Returns ok, dryrun or error. A move is one os.replace (atomic on one
     volume); across volumes it fails and the source stays where it is.
     """
     save = args.cleanup == "save"
     try:
-        dest = unique(Path(CLEANUP_DIR) / src) if save else None
+        dest = unique(Path(CLEANUP_DIR) / src.with_name(stem + src.suffix)) if save else None
         if args.dry_run:
             print(f"Would move: {src} -> {dest}" if save else f"Would delete: {src}")
             record(f"DRYRUN cleanup {args.cleanup} {src}")
@@ -1190,14 +1375,14 @@ def run_cleanup(tasks, args):
             return 1
         print()
 
-    done = Counter(cleanup_source(src, conv, args) for src, conv in removable)
+    done = Counter(cleanup_source(src, conv, stem, args) for src, conv, stem in removable)
 
     verb = "deleted" if args.cleanup == "delete" else "moved"
     if args.dry_run:
         verb = "would be " + verb
     msg = (f"Cleanup done. {done['ok'] + done['dryrun']} {verb}, "
            f"{len(kept)} kept (no converted file), "
-           f"{len(ambiguous)} skipped (shared converted file), {done['error']} errors.")
+           f"{len(ambiguous)} skipped (no clear match), {done['error']} errors.")
     print()
     print(msg)
     record(msg)
@@ -1292,6 +1477,9 @@ def build_parser():
                         "converted file next to them (same name, target extension): "
                         f"delete them, or save = move them to ./{CLEANUP_DIR} keeping the "
                         "folder tree")
+    g.add_argument("--verify", action="store_true",
+                   help="with --cleanup, compare the metadata (size, duration) of every "
+                        "source and its converted file, not only where names are ambiguous")
 
     g = p.add_argument_group("audio options")
     g.add_argument("--audio-to", choices=("mp3", "aac"), default="mp3",
@@ -1361,6 +1549,8 @@ def expand_modes(args):
         if not any(MODES[m][1] == "video" for m in modes) or \
                 any(MODES[m][1] != "video" for m in modes):
             raise ValueError("--merge works on video formats only (e.g. --videos, --mkv)")
+    if args.verify and not args.cleanup:
+        raise ValueError("--verify only applies to --cleanup")
     if args.cleanup:
         if args.merge:
             raise ValueError("--cleanup cannot be combined with --merge")

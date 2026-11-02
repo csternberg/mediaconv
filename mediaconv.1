@@ -1,4 +1,4 @@
-.TH MEDIACONV 1 "2026-11-02" "mediaconv 5.5" "User Commands"
+.TH MEDIACONV 1 "2026-11-02" "mediaconv 5.6" "User Commands"
 .SH NAME
 mediaconv \- batch-convert images, video and audio to widely compatible formats
 .SH SYNOPSIS
@@ -299,16 +299,38 @@ Use
 .B \-\-dry\-run
 to preview.
 .PP
-Only the exact name is checked: a converted file renamed
-.I myvideo_001.mp4
-by a name conflict does not count, and neither does an empty converted file.
-If two sources share one converted file
-.RI ( clip.wmv
+An empty converted file does not count.
+When names clash once a
+.I _NNN
+suffix is ignored
+.RI ( video1.mpg ,
+.IR video1.mts ,
+.I video1.mp4
 and
-.I clip.avi
-both map to
-.IR clip.mp4 ),
-both are skipped.
+.IR video1_001.mp4 ),
+the files are paired by metadata, using
+.B ffprobe
+for video and audio.
+Video needs the same displayed size (rotation applied) and a duration within the
+larger of 0.5 s or 1%; audio the same duration; images the same size (EXIF
+orientation applied) and a similar 8x8 grayscale fingerprint.
+A pair is made only when it is clearly the best for both sides; otherwise the
+source is kept and logged.
+With
+.B save
+the source takes the name of its partner:
+.I video1.mpg
+matching
+.I video1_001.mp4
+is saved as
+.IR cleanup/video1_001.mpg .
+.TP
+.B \-\-verify
+With
+.BR \-\-cleanup ,
+compare the metadata of every source and its converted file, not only where
+names clash. This also catches truncated conversions, but is slower.
+.PP
 Each of these cases prints a
 .B WARNING:
 line and is appended, with the full path and an explanation, to
