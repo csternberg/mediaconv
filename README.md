@@ -50,6 +50,7 @@ python mediaconv.py (-c | -r) [format switches] [options]
 | | `--preset NAME` | software encoder speed (default `medium`) |
 | | `--hw {nvenc,qsv,amf}` | hardware encoder |
 | | `--remux` | copy streams, no re-encode, for mkv/mov/ts/m4v/3gp/mpg |
+| | `--no-rename` | always re-encode `.m4v` (default: a `.m4v` that is already valid MP4 is renamed to `.mp4`, or copied without `-d`) |
 | Merge | `-m`, `--merge` | join the videos of each folder into `<folder>_merged.mp4` (see below) |
 | Cleanup | `--cleanup {delete,save}` | convert nothing; remove sources that already have a converted file (see below) |
 | | `--verify` | with `--cleanup`, compare the metadata of every source and converted file |

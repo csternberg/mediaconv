@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
 mediaconv.py
-Version: 2026-11-02 v5.6
+Version: 2026-11-05 v5.7
 
 Adaptive media converter (images, video, audio).
+
+- --m4v: a .m4v that already is a valid MP4 (ffprobe: MP4 container, MP4 codecs) is
+  renamed to .mp4 (copied unless -d) instead of re-encoded; --no-rename disables this
 
 - scan progress with -r: "N eligible files found" for every 100 folders scanned,
   and a "N folders scanned" tally in the summary
@@ -38,8 +41,8 @@ from fractions import Fraction
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
-VERSION = "5.6"
-VERSION_DATE = "2026-11-02"
+VERSION = "5.7"
+VERSION_DATE = "2026-11-05"
 VERSION_TEXT = f"mediaconv.py v{VERSION} ({VERSION_DATE})"
 
 Image = ImageOps = None     # Pillow, loaded on demand by ensure_prerequisites()
@@ -671,6 +674,48 @@ def probe_codecs(src):
     return found.get("video"), found.get("audio")
 
 
+def is_plain_mp4(src):
+    """True if src is already a valid MP4 container with MP4-compatible streams,
+    so a .m4v can simply be renamed to .mp4. Any doubt (unreadable, QuickTime
+    brand, unknown codec such as DRM-protected video) answers False."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries",
+             "format=format_name:format_tags=major_brand:stream=codec_type,codec_name",
+             "-of", "json", cli_path(src)],
+            capture_output=True, text=True, timeout=30)
+        if out.returncode != 0:
+            return False
+        info = json.loads(out.stdout)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+
+    fmt = info.get("format", {})
+    if "mp4" not in fmt.get("format_name", "").split(","):
+        return False
+    if fmt.get("tags", {}).get("major_brand", "").strip().lower() == "qt":
+        return False
+    video, audio = probe_codecs(src)
+    return video in MP4_VIDEO and (audio is None or audio in MP4_AUDIO)
+
+
+def rename_convert(src, dst, args):
+    """Move src to dst (-d), or copy it when the source is to be kept.
+    The copy goes through a .part file like every other output."""
+    if args.delete_source:
+        os.replace(src, dst) if args.overwrite else src.rename(dst)
+        record(f"RENAME {src} -> {dst}")
+        return
+    tmp = dst.with_name(dst.name + ".part")
+    try:
+        shutil.copyfile(src, tmp)
+        os.replace(tmp, dst)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    record(f"COPY {src} -> {dst}")
+
+
 def remux_args(src):
     """ffmpeg args to copy streams into MP4, or None if the codecs need re-encoding."""
     video, audio = probe_codecs(src)
@@ -760,9 +805,20 @@ def encode_args(mode, args):
 
 
 def video_convert(src, args, mode):
+    shortcut = (mode == "m4v" and not args.no_rename and not args.extract_audio
+                and is_plain_mp4(src))
     dst, early = begin(src, mode, args)
     if early:
+        if early == "dryrun" and shortcut:
+            record(f"DRYRUN m4v {src}: valid MP4, would rename instead of re-encoding")
         return early
+
+    if shortcut:
+        try:
+            rename_convert(src, dst, args)
+            return "ok"
+        except Exception as e:
+            record(f"WARN rename failed for {src}, re-encoding: {e}")
 
     tmp = dst.with_name(dst.name + ".part")
     attempts = []
@@ -1147,8 +1203,11 @@ def cleanup_facts(path, kind):
             if im.mode in ("RGBA", "LA", "P"):
                 im = im.convert("RGBA")
                 im = Image.alpha_composite(Image.new("RGBA", im.size, "white"), im)
-            return {"size": (w, h),
-                    "print": list(im.convert("L").resize((8, 8), Image.BOX).getdata())}
+            small = im.convert("L").resize((8, 8), Image.BOX)
+            # getdata() is deprecated in Pillow 12+; get_flattened_data() replaces it
+            pixels = small.get_flattened_data() if hasattr(small, "get_flattened_data") \
+                else small.getdata()
+            return {"size": (w, h), "print": list(pixels)}
     except Exception:
         return None
 
@@ -1318,7 +1377,8 @@ def report_cleanup_warnings(notes, args):
     """Print each warning and append it, with the full path, to CLEANUP_WARN_FILE."""
     if not notes:
         return
-    lines = [f"{src.resolve()}: {text}" for src, text in notes]
+    # absolute(), not resolve(): resolve() turns a mapped drive (X:\) into its UNC path
+    lines = [f"{src.absolute()}: {text}" for src, text in notes]
     for line in lines:
         print(f"WARNING: {line}")
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -1464,6 +1524,10 @@ def build_parser():
     g.add_argument("--remux", action="store_true",
                    help="copy streams without re-encoding for mkv/mov/ts/m4v/3gp/mpg "
                         "(falls back to encoding if copy fails)")
+
+    g.add_argument("--no-rename", action="store_true",
+                   help="always re-encode .m4v files; by default a .m4v that already is a "
+                        "valid MP4 is renamed to .mp4 (copied, unless -d)")
 
     g = p.add_argument_group("merge")
     g.add_argument("-m", "-M", "--merge", action="store_true",

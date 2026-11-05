@@ -33,5 +33,6 @@
 ## Console output and logging
 - All console output while workers run goes through `progress.say()` / `progress.update()` / `progress.finish_file()` so the live status line is not corrupted. Do not call bare `print` from worker code.
 - `record()`: errors go to stderr and always to `mediaconv.errors.log` (created lazily on first error); other messages go to `mediaconv.log` only with `--log`.
+- `--m4v` shortcut: `video_convert()` first asks `is_plain_mp4()` (ffprobe: MP4 container, non-QuickTime brand, codecs in `MP4_VIDEO`/`MP4_AUDIO`). If true, `rename_convert()` renames to `.mp4` with `-d`, otherwise copies (via `.part`) so the source is kept. A failure falls back to encoding; `--no-rename` and `--extract-audio` skip the shortcut. Dry-run reports it.
 - `--remux` copies only codecs in `MP4_VIDEO`/`MP4_AUDIO` (decided via `probe_codecs`), otherwise it re-encodes.
 - ffmpeg percent comes from `ffmpeg -progress pipe:1` (`out_time_us`) divided by the `ffprobe` duration.

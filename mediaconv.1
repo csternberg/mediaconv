@@ -1,4 +1,4 @@
-.TH MEDIACONV 1 "2026-11-02" "mediaconv 5.6" "User Commands"
+.TH MEDIACONV 1 "2026-11-03" "mediaconv 5.6.1" "User Commands"
 .SH NAME
 mediaconv \- batch-convert images, video and audio to widely compatible formats
 .SH SYNOPSIS
@@ -238,6 +238,16 @@ Audio that MP4 cannot carry is converted to AAC;
 if the video codec does not fit MP4, or the copy fails, the file is re-encoded.
 Requires
 .BR ffprobe .
+.TP
+.B \-\-no\-rename
+Always re-encode .m4v files.
+By default a .m4v that already is a valid MP4 (MP4 container, MP4-compatible
+codecs, checked with
+.BR ffprobe )
+is renamed to .mp4 without re-encoding.
+Without
+.B \-d
+the source is kept, so the file is copied instead of renamed.
 .SH MERGE
 .TP
 .BR \-m ", " \-M ", " \-\-merge
